@@ -7,12 +7,16 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.StructureTags;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.neoforged.fml.loading.FMLPaths;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -21,10 +25,12 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.function.Function;
+import java.util.function.IntBinaryOperator;
 
 /**
  * ==================================================================================
- *                       TNM AERONAUTICS QUESTS - GENERATOR
+ *                       AERONAUTICS DELIVERY QUESTS - GENERATOR
  * ==================================================================================
  * This class orchestrates the lifecycle, loading, and generation of delivery quests.
  * 
@@ -53,8 +59,8 @@ import java.util.*;
  *    - ANY_STRUCTURE:
  *      Searches for any registered Overworld structure (surface/top-level only).
  *    - RANDOM:
- *      Picks random coordinates inside the computed search bounds. Chunks are loaded to query
- *      the world heightmap and place the quest cargo safely on the surface.
+ *      Searches dry surface positions inside the computed bounds. In sky-island mode it scans
+ *      multiple positions per candidate chunk using a bounded, one-chunk-at-a-time search.
  *
  * 4. CONCURRENCY & THREAD SAFETY:
  *    - An AtomicBoolean lock ('isGenerating') guards the asynchronous execution.
@@ -73,9 +79,74 @@ public class QuestGenerator {
     private static Path questFilePath;
     private static Path cooldownFilePath;
     private static final java.util.concurrent.atomic.AtomicBoolean isGenerating = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static final java.util.concurrent.atomic.AtomicLong randomSearchEpoch = new java.util.concurrent.atomic.AtomicLong();
+    private static final TickWorkQueue<RandomSearchStep> randomSearchSteps = new TickWorkQueue<>();
+    private static final TicketType<ChunkPos> RANDOM_SEARCH_TICKET = TicketType.create(
+            "adq_random_search",
+            Comparator.comparingLong(ChunkPos::toLong),
+            600);
+    private static final TicketType<ChunkPos> STRUCTURE_SEARCH_TICKET = TicketType.create(
+            "adq_structure_search",
+            Comparator.comparingLong(ChunkPos::toLong),
+            600);
+    private static final int NORMAL_RANDOM_ATTEMPTS = 32;
+    private static final int[] NORMAL_CHUNK_SAMPLES = {8, 8};
+    private static final int[] SKY_CHUNK_SAMPLES = {
+        8, 8,
+        2, 2,
+        2, 8,
+        2, 13,
+        8, 2,
+        8, 13,
+        13, 2,
+        13, 8,
+        13, 13
+    };
+
+    private record RandomSearchStep(
+            MinecraftServer server,
+            long epoch,
+            Runnable action) {
+    }
 
     public static boolean isGenerating() {
         return isGenerating.get();
+    }
+
+    static void runRandomSearchStep(MinecraftServer server) {
+        randomSearchSteps.runOne(step -> {
+            if (step.server() != server || step.epoch() != randomSearchEpoch.get()) {
+                return;
+            }
+            try {
+                step.action().run();
+            } catch (Exception error) {
+                LOGGER.error("[ADQ] Unhandled error in tick-paced RANDOM search step", error);
+                randomSearchEpoch.incrementAndGet();
+                randomSearchSteps.clear();
+                isGenerating.set(false);
+                try {
+                    QuestBoardMenuHandler.resyncToAllPlayers(server);
+                } catch (Exception syncError) {
+                    LOGGER.error("[ADQ] Failed to resync quest boards after RANDOM search failure", syncError);
+                }
+            }
+        });
+    }
+
+    static void resetRandomSearchQueue() {
+        randomSearchEpoch.incrementAndGet();
+        randomSearchSteps.clear();
+        isGenerating.set(false);
+    }
+
+    private static void enqueueRandomSearchStep(
+            MinecraftServer server,
+            long epoch,
+            Runnable action) {
+        if (epoch == randomSearchEpoch.get()) {
+            randomSearchSteps.enqueue(new RandomSearchStep(server, epoch, action));
+        }
     }
 
     public static class CustomQuestTemplate {
@@ -177,7 +248,7 @@ public class QuestGenerator {
                     String content = new String(Files.readAllBytes(customQuestsPath));
                     if (content.contains("minecraft:emerald:300") || content.contains("minecraft:emerald:640")) {
                         needsGen = true;
-                        LOGGER.info("[TNM Quests] Outdated custom_quests.json detected. Overwriting with updated 1.0.2 economy values.");
+                        LOGGER.info("[ADQ] Outdated custom_quests.json detected. Overwriting with updated 1.0.2 economy values.");
                     }
                 } catch (Exception e) {
                     needsGen = true;
@@ -188,7 +259,7 @@ public class QuestGenerator {
                 try (Writer writer = Files.newBufferedWriter(customQuestsPath)) {
                     GSON.toJson(DEFAULT_TEMPLATES, writer);
                 }
-                LOGGER.info("[TNM Quests] Generated example custom_quests.json template.");
+                LOGGER.info("[ADQ] Generated example custom_quests.json template.");
             }
             
             try (Reader reader = Files.newBufferedReader(customQuestsPath)) {
@@ -196,10 +267,10 @@ public class QuestGenerator {
                 if (loaded != null) {
                     customTemplates.addAll(loaded);
                 }
-                LOGGER.info("[TNM Quests] Loaded {} custom quest templates from custom_quests.json", customTemplates.size());
+                LOGGER.info("[ADQ] Loaded {} custom quest templates from custom_quests.json", customTemplates.size());
             }
         } catch (Exception e) {
-            LOGGER.error("[TNM Quests] Failed to load custom quest templates", e);
+            LOGGER.error("[ADQ] Failed to load custom quest templates", e);
         }
     }
 
@@ -215,7 +286,7 @@ public class QuestGenerator {
             loadQuests();
             loadCooldowns();
         } catch (Exception e) {
-            LOGGER.error("[TNM Quests] Failed to initialize quest file path", e);
+            LOGGER.error("[ADQ] Failed to initialize quest file path", e);
         }
     }
 
@@ -223,9 +294,9 @@ public class QuestGenerator {
         if (questFilePath == null) return;
         try (Writer writer = Files.newBufferedWriter(questFilePath)) {
             GSON.toJson(availableQuests, writer);
-            LOGGER.info("[TNM Quests] Successfully saved {} quests to {}", availableQuests.size(), questFilePath.getFileName());
+            LOGGER.info("[ADQ] Successfully saved {} quests to {}", availableQuests.size(), questFilePath.getFileName());
         } catch (IOException e) {
-            LOGGER.error("[TNM Quests] Failed to save quests to file", e);
+            LOGGER.error("[ADQ] Failed to save quests to file", e);
         }
     }
 
@@ -242,9 +313,9 @@ public class QuestGenerator {
             if (loaded != null) {
                 availableQuests.addAll(loaded);
             }
-            LOGGER.info("[TNM Quests] Loaded {} quests from {}", availableQuests.size(), questFilePath.getFileName());
+            LOGGER.info("[ADQ] Loaded {} quests from {}", availableQuests.size(), questFilePath.getFileName());
         } catch (IOException e) {
-            LOGGER.error("[TNM Quests] Failed to load quests from file", e);
+            LOGGER.error("[ADQ] Failed to load quests from file", e);
         }
     }
 
@@ -256,9 +327,9 @@ public class QuestGenerator {
                 stringMap.put(entry.getKey().toString(), entry.getValue());
             }
             GSON.toJson(stringMap, writer);
-            LOGGER.info("[TNM Quests] Successfully saved {} cooldowns to {}", playerCooldowns.size(), cooldownFilePath.getFileName());
+            LOGGER.info("[ADQ] Successfully saved {} cooldowns to {}", playerCooldowns.size(), cooldownFilePath.getFileName());
         } catch (IOException e) {
-            LOGGER.error("[TNM Quests] Failed to save cooldowns to file", e);
+            LOGGER.error("[ADQ] Failed to save cooldowns to file", e);
         }
     }
 
@@ -274,13 +345,13 @@ public class QuestGenerator {
                     try {
                         playerCooldowns.put(UUID.fromString(entry.getKey()), entry.getValue());
                     } catch (IllegalArgumentException e) {
-                        LOGGER.error("[TNM Quests] Invalid UUID in cooldown file: " + entry.getKey(), e);
+                        LOGGER.error("[ADQ] Invalid UUID in cooldown file: " + entry.getKey(), e);
                     }
                 }
             }
-            LOGGER.info("[TNM Quests] Loaded {} cooldowns from {}", playerCooldowns.size(), cooldownFilePath.getFileName());
+            LOGGER.info("[ADQ] Loaded {} cooldowns from {}", playerCooldowns.size(), cooldownFilePath.getFileName());
         } catch (IOException e) {
-            LOGGER.error("[TNM Quests] Failed to load cooldowns from file", e);
+            LOGGER.error("[ADQ] Failed to load cooldowns from file", e);
         }
     }
 
@@ -317,17 +388,18 @@ public class QuestGenerator {
         }
         // Acquire concurrency lock to prevent multiple simultaneous background generation threads
         if (!isGenerating.compareAndSet(false, true)) {
-            LOGGER.info("[TNM Quests] Quest generation is already running. Skipping duplicate invocation.");
+            LOGGER.info("[ADQ] Quest generation is already running. Skipping duplicate invocation.");
             return;
         }
  
         // Resync to all players to update the generator button state immediately (greys out generate buttons)
         level.getServer().execute(() -> QuestBoardMenuHandler.resyncToAllPlayers(level.getServer()));
  
-        LOGGER.info("[TNM Quests] Triggering periodic quest generation asynchronously...");
+        LOGGER.info("[ADQ] Triggering periodic quest generation asynchronously...");
 
         boolean useCustom = ADQConfig.QUEST_GEN_MODE.get() == ADQConfig.QuestGenerationMode.CUSTOM;
-        List<CustomQuestTemplate> templatesSource = customTemplates.isEmpty() ? DEFAULT_TEMPLATES : customTemplates;
+        List<CustomQuestTemplate> templatesSource = List.copyOf(
+                customTemplates.isEmpty() ? DEFAULT_TEMPLATES : customTemplates);
         CustomQuestTemplate selectedTemplate = null;
         ParsedCoords customStart = null;
         ParsedCoords customEnd = null;
@@ -351,12 +423,9 @@ public class QuestGenerator {
                     BlockPos startingPos = resolvePosition(level, finalCustomStart);
                     BlockPos endingPos = resolvePosition(level, finalCustomEnd);
 
-                    if (startingPos == null || endingPos == null) {
-                        announceGenerationFailure(level);
-                        return;
-                    }
-
-                    if (!isWellWithinBorder(level, startingPos) || !isWellWithinBorder(level, endingPos)) {
+                    if (startingPos == null || endingPos == null
+                            || !isWellWithinBorder(level, startingPos)
+                            || !isWellWithinBorder(level, endingPos)) {
                         announceGenerationFailure(level);
                         return;
                     }
@@ -378,10 +447,10 @@ public class QuestGenerator {
                     }
                     saveQuests();
 
-                    LOGGER.info("[TNM Quests] Generated custom coordinates quest: '{}' [{} class, {}kpg, Schematic: {}] from {} to {}", 
+                    LOGGER.info("[ADQ] Generated custom coordinates quest: '{}' [{} class, {}kpg, Schematic: {}] from {} to {}",
                             name, weightClass, (int)actualWeight, quest.getSchematicName(), startingPos.toShortString(), endingPos.toShortString());
                 } catch (Exception e) {
-                    LOGGER.error("[TNM Quests] Error finalising custom coords quest on server thread", e);
+                    LOGGER.error("[ADQ] Error finalising custom coords quest on server thread", e);
                 } finally {
                     isGenerating.set(false);
                     if (triggerPlayerUuid != null) {
@@ -398,6 +467,17 @@ public class QuestGenerator {
         }
 
         final CustomQuestTemplate finalSelectedTemplate = selectedTemplate;
+        final ADQConfig.QuestLocationMode locationMode = ADQConfig.QUEST_LOCATION_MODE.get();
+
+        if (locationMode == ADQConfig.QuestLocationMode.RANDOM) {
+            level.getServer().execute(() -> startRandomQuestSearch(
+                    level,
+                    triggerPlayerUuid,
+                    useCustom,
+                    finalSelectedTemplate,
+                    templatesSource));
+            return;
+        }
  
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             boolean scheduledFinalization = false;
@@ -405,23 +485,22 @@ public class QuestGenerator {
                 Registry<Structure> registry = level.registryAccess().registryOrThrow(Registries.STRUCTURE);
                 Optional<HolderSet.Named<Structure>> villageHolderSet = registry.getTag(StructureTags.VILLAGE);
 
-                ADQConfig.QuestLocationMode locMode = ADQConfig.QUEST_LOCATION_MODE.get();
                 HolderSet<Structure> targetHolderSet = null;
 
-                if (locMode == ADQConfig.QuestLocationMode.VILLAGE) {
+                if (locationMode == ADQConfig.QuestLocationMode.VILLAGE) {
                     if (villageHolderSet.isPresent()) {
                         targetHolderSet = villageHolderSet.get();
                     } else {
-                        LOGGER.warn("[TNM Quests] Village structure tag not found in registry! Aborting quest generation.");
+                        LOGGER.warn("[ADQ] Village structure tag not found in registry! Aborting quest generation.");
                         return;
                     }
-                } else if (locMode == ADQConfig.QuestLocationMode.ANY_STRUCTURE) {
+                } else if (locationMode == ADQConfig.QuestLocationMode.ANY_STRUCTURE) {
                     List<net.minecraft.core.Holder<Structure>> allHolders = new ArrayList<>();
                     for (var ref : registry.holders().toList()) {
                         allHolders.add(ref);
                     }
                     if (allHolders.isEmpty()) {
-                        LOGGER.warn("[TNM Quests] No structures found in registry! Aborting quest generation.");
+                        LOGGER.warn("[ADQ] No structures found in registry! Aborting quest generation.");
                         return;
                     }
                     targetHolderSet = HolderSet.direct(allHolders);
@@ -434,38 +513,26 @@ public class QuestGenerator {
                 BlockPos searchCenter = null;
                 double R = ADQConfig.MIN_PLAYER_RADIUS.get();
 
-                // If a specific player triggered this generation (command or board button),
-                // center the search on them so their pickup spawns nearby instead of being
-                // scattered across the whole player spread.
-                ServerPlayer requestingPlayer = triggerPlayerUuid != null
-                        ? level.getServer().getPlayerList().getPlayer(triggerPlayerUuid) : null;
-
-                List<ServerPlayer> players = level.players();
-                if (requestingPlayer != null && requestingPlayer.serverLevel() == level) {
-                    searchCenter = requestingPlayer.blockPosition();
-                } else if (!players.isEmpty()) {
-                    // Pick a random player as center base
-                    ServerPlayer randomPlayer = players.get(rand.nextInt(players.size()));
-                    searchCenter = randomPlayer.blockPosition();
-
-                    if (players.size() >= 2) {
-                        double maxDist = 0;
-                        for (int i = 0; i < players.size(); i++) {
-                            for (int j = i + 1; j < players.size(); j++) {
-                                double d = Math.sqrt(players.get(i).blockPosition().distSqr(players.get(j).blockPosition()));
-                                if (d > maxDist) {
-                                    maxDist = d;
-                                }
-                            }
-                        }
-                        R = maxDist + ADQConfig.PLAYER_RADIUS_SCALING.get();
+                if (triggerPlayerUuid != null) {
+                    ServerPlayer triggerPlayer = level.getServer().getPlayerList().getPlayer(triggerPlayerUuid);
+                    if (triggerPlayer != null) {
+                        searchCenter = triggerPlayer.blockPosition();
                     }
-                } else {
-                    // Fallback to server spawn if no players are online
-                    searchCenter = level.getSharedSpawnPos();
                 }
 
-                LOGGER.info("[TNM Quests] Searching quest origin around center {} with radius {} blocks.", 
+                if (searchCenter == null) {
+                    List<ServerPlayer> players = level.players();
+                    if (!players.isEmpty()) {
+                        // Pick a random player as center base
+                        ServerPlayer randomPlayer = players.get(rand.nextInt(players.size()));
+                        searchCenter = randomPlayer.blockPosition();
+                    } else {
+                        // Fallback to server spawn if no players are online
+                        searchCenter = level.getSharedSpawnPos();
+                    }
+                }
+
+                LOGGER.info("[ADQ] Searching quest origin around center {} with radius {} blocks.",
                         searchCenter.toShortString(), (int)R);
 
                 BlockPos startPosRaw = null;
@@ -483,27 +550,19 @@ public class QuestGenerator {
                         continue;
                     }
 
-                    if (locMode == ADQConfig.QuestLocationMode.RANDOM) {
-                        double distFromCenter = Math.sqrt(targetOrigin.distSqr(searchCenter));
-                        if (distFromCenter >= ADQConfig.MIN_START_DISTANCE.get()) {
-                            startPosRaw = targetOrigin;
+                    var startResult = level.getChunkSource().getGenerator().findNearestMapStructure(
+                            level,
+                            targetHolderSet,
+                            targetOrigin,
+                            64,
+                            false
+                    );
+                    if (startResult != null) {
+                        BlockPos foundStart = startResult.getFirst();
+                        double distFromCenter = Math.sqrt(foundStart.distSqr(searchCenter));
+                        if (distFromCenter >= ADQConfig.MIN_START_DISTANCE.get() && isWellWithinBorder(level, foundStart)) {
+                            startPosRaw = foundStart;
                             break;
-                        }
-                    } else {
-                        var startResult = level.getChunkSource().getGenerator().findNearestMapStructure(
-                                level,
-                                targetHolderSet,
-                                targetOrigin,
-                                64,
-                                false
-                        );
-                        if (startResult != null) {
-                            BlockPos foundStart = startResult.getFirst();
-                            double distFromCenter = Math.sqrt(foundStart.distSqr(searchCenter));
-                            if (distFromCenter >= ADQConfig.MIN_START_DISTANCE.get() && isWellWithinBorder(level, foundStart)) {
-                                startPosRaw = foundStart;
-                                break;
-                            }
                         }
                     }
 
@@ -537,25 +596,20 @@ public class QuestGenerator {
                         continue;
                     }
 
-                    if (locMode == ADQConfig.QuestLocationMode.RANDOM) {
-                        endingPosRaw = targetOrigin;
-                        break;
-                    } else {
-                        var endResult = level.getChunkSource().getGenerator().findNearestMapStructure(
-                                level,
-                                targetHolderSet,
-                                targetOrigin,
-                                64,
-                                false
-                        );
+                    var endResult = level.getChunkSource().getGenerator().findNearestMapStructure(
+                            level,
+                            targetHolderSet,
+                            targetOrigin,
+                            64,
+                            false
+                    );
 
-                        if (endResult != null) {
-                            BlockPos foundPos = endResult.getFirst();
-                            double distBlocks = Math.sqrt(foundPos.distSqr(startPosRaw));
-                            if (distBlocks >= minDistance && isWellWithinBorder(level, foundPos)) {
-                                endingPosRaw = foundPos;
-                                break;
-                            }
+                    if (endResult != null) {
+                        BlockPos foundPos = endResult.getFirst();
+                        double distBlocks = Math.sqrt(foundPos.distSqr(startPosRaw));
+                        if (distBlocks >= minDistance && isWellWithinBorder(level, foundPos)) {
+                            endingPosRaw = foundPos;
+                            break;
                         }
                     }
 
@@ -574,121 +628,35 @@ public class QuestGenerator {
 
                 final BlockPos finalStartPosRaw = startPosRaw;
                 final BlockPos finalEndPosRaw = endingPosRaw;
+                LOGGER.info(
+                        "[ADQ] Found {} route candidates from {} to {}.",
+                        locationMode,
+                        finalStartPosRaw.toShortString(),
+                        finalEndPosRaw.toShortString());
 
-                // 4. Dispatch back to main server thread for height placement and register
+                // 4. Retain both endpoint chunks until their surfaces have been validated.
                 scheduledFinalization = true;
-                level.getServer().execute(() -> {
-                    try {
-                        level.getChunkAt(finalStartPosRaw);
-                        int startY = level.getHeight(Heightmap.Types.WORLD_SURFACE, finalStartPosRaw.getX(), finalStartPosRaw.getZ());
-                        if (startY <= level.getMinBuildHeight()) {
-                            // Empty column (open void on floating-island world types) — abort
-                            // instead of spawning cargo over nothing.
-                            announceGenerationFailure(level);
-                            return;
-                        }
-                        if (startY < level.getMinBuildHeight() + 10) {
-                            startY = level.getSeaLevel();
-                        }
-                        BlockPos startingPos = new BlockPos(finalStartPosRaw.getX(), startY, finalStartPosRaw.getZ());
-
-                        if (!isWellWithinBorder(level, startingPos)) {
-                            announceGenerationFailure(level);
-                            return;
-                        }
-
-                        level.getChunkAt(finalEndPosRaw);
-                        int endY = level.getHeight(Heightmap.Types.WORLD_SURFACE, finalEndPosRaw.getX(), finalEndPosRaw.getZ());
-                        if (endY <= level.getMinBuildHeight()) {
-                            announceGenerationFailure(level);
-                            return;
-                        }
-                        if (endY < level.getMinBuildHeight() + 10) {
-                            endY = level.getSeaLevel();
-                        }
-                        BlockPos endingPos = new BlockPos(finalEndPosRaw.getX(), endY, finalEndPosRaw.getZ());
-
-                        if (!isWellWithinBorder(level, endingPos)) {
-                            announceGenerationFailure(level);
-                            return;
-                        }
-
-                        UUID questId = UUID.randomUUID();
-                        String name;
-                        String description;
-                        String weightClass;
-                        double actualWeight;
-                        List<String> rewards = new ArrayList<>();
-                        String schematicName;
-
-
-                        // Case A: CUSTOM Mode. Spawns quests exactly as authored.
-                        if (useCustom) {
-                            CustomQuestTemplate template = finalSelectedTemplate;
-                            if (template == null) {
-                                List<CustomQuestTemplate> templatesWithoutCoords = new ArrayList<>();
-                                for (CustomQuestTemplate t : templatesSource) {
-                                    if (parseCoordinates(t.pickupPos) == null || parseCoordinates(t.dropoffPos) == null) {
-                                        templatesWithoutCoords.add(t);
-                                    }
-                                }
-                                if (templatesWithoutCoords.isEmpty()) {
-                                    templatesWithoutCoords = templatesSource;
-                                }
-                                template = templatesWithoutCoords.get(rand.nextInt(templatesWithoutCoords.size()));
-                            }
-                            name = template.name;
-                            description = template.description;
-                            weightClass = template.weightClass;
-                            actualWeight = template.actualWeight;
-                            rewards.addAll(template.rewards);
-                            schematicName = template.schematicName;
-                        }
-                        // Case B: PROCEDURAL Mode. Mixes and matches properties (Name, Desc, Schematic, Rewards)
-                        // from different templates randomly to create a hybridized quest.
-                        else {
-                            CustomQuestTemplate nameTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
-                            CustomQuestTemplate descTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
-                            CustomQuestTemplate weightTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
-                            CustomQuestTemplate schematicTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
-                            CustomQuestTemplate rewardTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
-
-                            name = nameTemplate.name;
-                            description = descTemplate.description;
-                            weightClass = weightTemplate.weightClass;
-                            actualWeight = weightTemplate.actualWeight;
-                            rewards.addAll(rewardTemplate.rewards);
-                            schematicName = schematicTemplate.schematicName;
-                        }
-
-                        QuestModel quest = new QuestModel(questId, name, description, startingPos, endingPos, weightClass, actualWeight, rewards);
-                        quest.setCreationTime(System.currentTimeMillis());
-                        quest.setSchematicName(schematicName);
-
-                        synchronized (availableQuests) {
-                            availableQuests.add(quest);
-                        }
-                        saveQuests();
-
-                        LOGGER.info("[TNM Quests] Generated new quest: '{}' [{} class, {}kpg, Schematic: {}] from {} to {}", 
-                                name, weightClass, (int)actualWeight, quest.getSchematicName(), startingPos.toShortString(), endingPos.toShortString());
-                    } catch (Exception e) {
-                        LOGGER.error("[TNM Quests] Error finalising quest on server thread", e);
-                    } finally {
-                        isGenerating.set(false);
-                        if (triggerPlayerUuid != null) {
-                            ServerPlayer triggerPlayer = level.getServer().getPlayerList().getPlayer(triggerPlayerUuid);
-                            if (triggerPlayer != null) {
-                                ADQEventHandler.clearActionCooldown(triggerPlayer, "generate");
-                                ADQEventHandler.clearActionCooldown(triggerPlayer, "fill");
-                            }
-                        }
-                        QuestBoardMenuHandler.resyncToAllPlayers(level.getServer());
-                    }
-                });
+                int startChunkX = net.minecraft.core.SectionPos.blockToSectionCoord(finalStartPosRaw.getX());
+                int startChunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(finalStartPosRaw.getZ());
+                int endChunkX = net.minecraft.core.SectionPos.blockToSectionCoord(finalEndPosRaw.getX());
+                int endChunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(finalEndPosRaw.getZ());
+                level.getServer().execute(() -> loadStructureRouteChunks(
+                        level,
+                        finalStartPosRaw,
+                        finalEndPosRaw,
+                        startChunkX,
+                        startChunkZ,
+                        endChunkX,
+                        endChunkZ,
+                        useCustom,
+                        finalSelectedTemplate,
+                        templatesSource,
+                        rand,
+                        triggerPlayerUuid,
+                        locationMode));
 
             } catch (Exception e) {
-                LOGGER.error("[TNM Quests] Error in async quest generator thread", e);
+                LOGGER.error("[ADQ] Error in async quest generator thread", e);
             } finally {
                 if (!scheduledFinalization) {
                     isGenerating.set(false);
@@ -698,12 +666,701 @@ public class QuestGenerator {
         });
     }
 
+    private static void loadStructureRouteChunks(
+            ServerLevel level,
+            BlockPos startPosRaw,
+            BlockPos endPosRaw,
+            int startChunkX,
+            int startChunkZ,
+            int endChunkX,
+            int endChunkZ,
+            boolean useCustom,
+            CustomQuestTemplate selectedTemplate,
+            List<CustomQuestTemplate> templatesSource,
+            net.minecraft.util.RandomSource rand,
+            UUID triggerPlayerUuid,
+            ADQConfig.QuestLocationMode locationMode) {
+        net.minecraft.server.level.ServerChunkCache chunkSource = level.getChunkSource();
+        ChunkPos startTicketPos = new ChunkPos(startChunkX, startChunkZ);
+        ChunkPos endTicketPos = new ChunkPos(endChunkX, endChunkZ);
+
+        try {
+            chunkSource.addRegionTicket(STRUCTURE_SEARCH_TICKET, startTicketPos, 2, startTicketPos);
+            chunkSource.addRegionTicket(STRUCTURE_SEARCH_TICKET, endTicketPos, 2, endTicketPos);
+
+            var startFuture = java.util.concurrent.CompletableFuture
+                    .supplyAsync(() -> chunkSource.getChunkFuture(
+                            startChunkX,
+                            startChunkZ,
+                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
+                            true))
+                    .thenCompose(Function.identity());
+            var endFuture = java.util.concurrent.CompletableFuture
+                    .supplyAsync(() -> chunkSource.getChunkFuture(
+                            endChunkX,
+                            endChunkZ,
+                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
+                            true))
+                    .thenCompose(Function.identity());
+
+            startFuture.thenCombine(endFuture, (startResult, endResult) -> new ChunkAccess[] {
+                    startResult.orElse(null),
+                    endResult.orElse(null)
+            }).whenComplete((loadedChunks, error) -> level.getServer().execute(() -> {
+                try {
+                    if (error != null) {
+                        LOGGER.error("[ADQ] Failed to load structure route chunks", error);
+                        failGeneration(level, triggerPlayerUuid);
+                        return;
+                    }
+                    if (loadedChunks == null || loadedChunks[0] == null || loadedChunks[1] == null) {
+                        LOGGER.warn("[ADQ] One or both structure route chunks were unavailable.");
+                        failGeneration(level, triggerPlayerUuid);
+                        return;
+                    }
+
+                    BlockPos startingPos = resolveStructureLanding(
+                            level,
+                            loadedChunks[0],
+                            startPosRaw);
+                    BlockPos endingPos = resolveStructureLanding(
+                            level,
+                            loadedChunks[1],
+                            endPosRaw);
+                    if (startingPos == null || endingPos == null) {
+                        LOGGER.warn(
+                                "[ADQ] Structure route surface validation failed: start {} -> {}, end {} -> {}.",
+                                startPosRaw.toShortString(),
+                                startingPos == null ? "invalid" : startingPos.toShortString(),
+                                endPosRaw.toShortString(),
+                                endingPos == null ? "invalid" : endingPos.toShortString());
+                        failGeneration(level, triggerPlayerUuid);
+                        return;
+                    }
+
+                    registerGeneratedQuest(
+                            level,
+                            startingPos,
+                            endingPos,
+                            useCustom,
+                            selectedTemplate,
+                            templatesSource,
+                            rand,
+                            triggerPlayerUuid,
+                            locationMode.name());
+                } finally {
+                    chunkSource.removeRegionTicket(
+                            STRUCTURE_SEARCH_TICKET,
+                            startTicketPos,
+                            2,
+                            startTicketPos);
+                    chunkSource.removeRegionTicket(
+                            STRUCTURE_SEARCH_TICKET,
+                            endTicketPos,
+                            2,
+                            endTicketPos);
+                }
+            }));
+        } catch (Exception error) {
+            chunkSource.removeRegionTicket(
+                    STRUCTURE_SEARCH_TICKET,
+                    startTicketPos,
+                    2,
+                    startTicketPos);
+            chunkSource.removeRegionTicket(
+                    STRUCTURE_SEARCH_TICKET,
+                    endTicketPos,
+                    2,
+                    endTicketPos);
+            LOGGER.error("[ADQ] Could not request structure route chunks", error);
+            failGeneration(level, triggerPlayerUuid);
+        }
+    }
+
+    private static void startRandomQuestSearch(
+            ServerLevel level,
+            UUID triggerPlayerUuid,
+            boolean useCustom,
+            CustomQuestTemplate selectedTemplate,
+            List<CustomQuestTemplate> templatesSource) {
+        try {
+            net.minecraft.util.RandomSource rand = net.minecraft.util.RandomSource.create();
+            BlockPos searchCenter = null;
+
+            if (triggerPlayerUuid != null) {
+                ServerPlayer triggerPlayer = level.getServer().getPlayerList().getPlayer(triggerPlayerUuid);
+                if (triggerPlayer != null) {
+                    searchCenter = triggerPlayer.blockPosition();
+                }
+            }
+
+            if (searchCenter == null) {
+                List<ServerPlayer> players = level.players();
+                searchCenter = players.isEmpty()
+                        ? level.getSharedSpawnPos()
+                        : players.get(rand.nextInt(players.size())).blockPosition();
+            }
+
+            double searchRadius = ADQConfig.MIN_PLAYER_RADIUS.get();
+            double minStartRadius = ADQConfig.MIN_START_DISTANCE.get();
+            if (searchRadius < minStartRadius) {
+                LOGGER.warn(
+                        "[ADQ] RANDOM search radius {} is smaller than minStartDistance {}.",
+                        (int) searchRadius,
+                        (int) minStartRadius);
+                failGeneration(level, triggerPlayerUuid);
+                return;
+            }
+
+            int configuredAttempts = ADQConfig.RANDOM_SEARCH_ATTEMPTS.get();
+            boolean skyIslandMode = ADQConfig.SKY_ISLAND_MODE.get();
+            int attempts = skyIslandMode
+                    ? configuredAttempts
+                    : Math.min(configuredAttempts, NORMAL_RANDOM_ATTEMPTS);
+            long epoch = randomSearchEpoch.get();
+
+            LOGGER.info(
+                    "[ADQ] RANDOM dry-land search started around {}: skyIslandMode={}, "
+                            + "maxChunksPerEndpoint={}, one search action per server tick.",
+                    searchCenter.toShortString(),
+                    skyIslandMode,
+                    attempts);
+
+            findRandomRoute(
+                    level,
+                    searchCenter,
+                    minStartRadius,
+                    searchRadius,
+                    ADQConfig.MIN_DISTANCE.get(),
+                    Math.max(ADQConfig.MIN_DISTANCE.get(), ADQConfig.MAX_DISTANCE.get()),
+                    attempts,
+                    skyIslandMode,
+                    rand.nextDouble() * Math.PI * 2.0,
+                    epoch)
+                .whenComplete((route, error) -> enqueueRandomSearchStep(
+                        level.getServer(),
+                        epoch,
+                        () -> {
+                            if (error != null) {
+                                LOGGER.error("[ADQ] RANDOM dry-land search failed", error);
+                                failGeneration(level, triggerPlayerUuid);
+                                return;
+                            }
+                            if (route == null) {
+                                failGeneration(level, triggerPlayerUuid);
+                                return;
+                            }
+                            registerGeneratedQuest(
+                                    level,
+                                    route.start(),
+                                    route.end(),
+                                    useCustom,
+                                    selectedTemplate,
+                                    templatesSource,
+                                    rand,
+                                    triggerPlayerUuid,
+                                    "RANDOM");
+                        }));
+        } catch (Exception error) {
+            LOGGER.error("[ADQ] Could not start tick-paced RANDOM search", error);
+            failGeneration(level, triggerPlayerUuid);
+        }
+    }
+
+    private record RandomRoute(BlockPos start, BlockPos end) {
+    }
+
+    private static java.util.concurrent.CompletableFuture<RandomRoute> findRandomRoute(
+            ServerLevel level,
+            BlockPos searchCenter,
+            double minStartRadius,
+            double maxStartRadius,
+            double minDeliveryRadius,
+            double maxDeliveryRadius,
+            int attempts,
+            boolean skyIslandMode,
+            double phase,
+            long epoch) {
+        return findRandomDryLanding(
+                level,
+                searchCenter,
+                minStartRadius,
+                maxStartRadius,
+                attempts,
+                skyIslandMode,
+                phase,
+                "pickup",
+                epoch)
+            .thenCompose(start -> {
+                if (start == null) {
+                    return java.util.concurrent.CompletableFuture.completedFuture(null);
+                }
+                return findRandomDryLanding(
+                        level,
+                        start,
+                        minDeliveryRadius,
+                        maxDeliveryRadius,
+                        attempts,
+                        skyIslandMode,
+                        phase + Math.PI,
+                        "delivery",
+                        epoch)
+                    .thenApply(end -> end == null ? null : new RandomRoute(start, end));
+            });
+    }
+
+    private static java.util.concurrent.CompletableFuture<BlockPos> findRandomDryLanding(
+            ServerLevel level,
+            BlockPos origin,
+            double minRadius,
+            double maxRadius,
+            int attempts,
+            boolean skyIslandMode,
+            double phase,
+            String endpointName,
+            long epoch) {
+        java.util.concurrent.CompletableFuture<BlockPos> result = new java.util.concurrent.CompletableFuture<>();
+        enqueueRandomSearchStep(
+                level.getServer(),
+                epoch,
+                () -> searchNextRandomChunk(
+                        level,
+                        origin,
+                        minRadius,
+                        maxRadius,
+                        attempts,
+                        skyIslandMode,
+                        phase,
+                        endpointName,
+                        0,
+                        new HashSet<>(),
+                        result,
+                        epoch));
+        return result;
+    }
+
+    private static void searchNextRandomChunk(
+            ServerLevel level,
+            BlockPos origin,
+            double minRadius,
+            double maxRadius,
+            int attempts,
+            boolean skyIslandMode,
+            double phase,
+            String endpointName,
+            int nextAttempt,
+            Set<Long> visitedChunks,
+            java.util.concurrent.CompletableFuture<BlockPos> result,
+            long epoch) {
+        if (result.isDone() || epoch != randomSearchEpoch.get()) {
+            return;
+        }
+
+        int attempt = nextAttempt;
+        RandomLandingPlanner.Candidate candidate = null;
+        int chunkX = 0;
+        int chunkZ = 0;
+        while (attempt < attempts) {
+            candidate = RandomLandingPlanner.candidate(
+                    origin.getX(),
+                    origin.getZ(),
+                    minRadius,
+                    maxRadius,
+                    attempt,
+                    attempts,
+                    phase);
+            chunkX = net.minecraft.core.SectionPos.blockToSectionCoord(candidate.x());
+            chunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(candidate.z());
+            long chunkKey = net.minecraft.world.level.ChunkPos.asLong(chunkX, chunkZ);
+            attempt++;
+
+            if (visitedChunks.add(chunkKey)
+                    && isWellWithinBorder(level, new BlockPos(candidate.x(), 64, candidate.z()))) {
+                break;
+            }
+            candidate = null;
+        }
+
+        if (candidate == null) {
+            LOGGER.warn(
+                    "[ADQ] RANDOM {} search exhausted {} unique-chunk attempts without dry land.",
+                    endpointName,
+                    visitedChunks.size());
+            result.complete(null);
+            return;
+        }
+
+        final int completedAttempt = attempt;
+        final int candidateChunkX = chunkX;
+        final int candidateChunkZ = chunkZ;
+        if (completedAttempt > 1 && (completedAttempt - 1) % 16 == 0) {
+            LOGGER.info(
+                    "[ADQ] RANDOM {} search checked {}/{} candidate chunks.",
+                    endpointName,
+                    completedAttempt - 1,
+                    attempts);
+        }
+
+        try {
+            net.minecraft.server.level.ServerChunkCache chunkSource = level.getChunkSource();
+            ChunkPos ticketPos = new ChunkPos(candidateChunkX, candidateChunkZ);
+            chunkSource.addRegionTicket(RANDOM_SEARCH_TICKET, ticketPos, 2, ticketPos);
+            java.util.concurrent.CompletableFuture
+                .supplyAsync(() -> chunkSource.getChunkFuture(
+                            candidateChunkX,
+                            candidateChunkZ,
+                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
+                            true))
+                .thenCompose(chunkFuture -> chunkFuture)
+                .whenComplete((chunkResult, error) -> {
+                    try {
+                        enqueueRandomSearchStep(level.getServer(), epoch, () -> {
+                            try {
+                                if (error != null) {
+                                    LOGGER.warn(
+                                        "[ADQ] Failed to load RANDOM {} candidate chunk {},{}; continuing.",
+                                            endpointName,
+                                            candidateChunkX,
+                                            candidateChunkZ,
+                                            error);
+                                } else {
+                                    ChunkAccess loadedChunk = chunkResult == null
+                                            ? null
+                                            : chunkResult.orElse(null);
+                                    if (loadedChunk == null) {
+                                        LOGGER.warn(
+                                                "[ADQ] RANDOM {} candidate chunk {},{} was unavailable: {}; continuing.",
+                                                endpointName,
+                                                candidateChunkX,
+                                                candidateChunkZ,
+                                                chunkResult == null ? "missing result" : chunkResult.getError());
+                                    }
+                                    BlockPos landing = findDryLandingInChunk(
+                                            level,
+                                            loadedChunk,
+                                            candidateChunkX,
+                                            candidateChunkZ,
+                                            origin,
+                                            minRadius,
+                                            maxRadius,
+                                            skyIslandMode);
+                                    if (landing != null) {
+                                        LOGGER.info(
+                                                "[ADQ] RANDOM {} found dry land at {} after {} chunk checks.",
+                                                endpointName,
+                                                landing.toShortString(),
+                                                completedAttempt);
+                                        result.complete(landing);
+                                        return;
+                                    }
+                                }
+                                searchNextRandomChunk(
+                                        level,
+                                        origin,
+                                        minRadius,
+                                        maxRadius,
+                                        attempts,
+                                        skyIslandMode,
+                                        phase,
+                                        endpointName,
+                                        completedAttempt,
+                                        visitedChunks,
+                                        result,
+                                        epoch);
+                            } finally {
+                                chunkSource.removeRegionTicket(
+                                        RANDOM_SEARCH_TICKET,
+                                        ticketPos,
+                                        2,
+                                        ticketPos);
+                            }
+                        });
+                    } catch (Exception schedulingError) {
+                        result.completeExceptionally(schedulingError);
+                    }
+                });
+        } catch (Exception chunkRequestError) {
+            LOGGER.warn(
+                    "[ADQ] Could not request RANDOM {} candidate chunk {},{}; continuing.",
+                    endpointName,
+                    candidateChunkX,
+                    candidateChunkZ,
+                    chunkRequestError);
+            enqueueRandomSearchStep(
+                    level.getServer(),
+                    epoch,
+                    () -> searchNextRandomChunk(
+                            level,
+                            origin,
+                            minRadius,
+                            maxRadius,
+                            attempts,
+                            skyIslandMode,
+                            phase,
+                            endpointName,
+                            completedAttempt,
+                            visitedChunks,
+                            result,
+                            epoch));
+        }
+    }
+
+    private static BlockPos findDryLandingInChunk(
+            ServerLevel level,
+            ChunkAccess loadedChunk,
+            int chunkX,
+            int chunkZ,
+            BlockPos origin,
+            double minRadius,
+            double maxRadius,
+            boolean skyIslandMode) {
+        if (loadedChunk == null) {
+            return null;
+        }
+        int[] samples = skyIslandMode ? SKY_CHUNK_SAMPLES : NORMAL_CHUNK_SAMPLES;
+        int minBlockX = chunkX << 4;
+        int minBlockZ = chunkZ << 4;
+
+        for (int index = 0; index < samples.length; index += 2) {
+            int x = minBlockX + samples[index];
+            int z = minBlockZ + samples[index + 1];
+            double distance = Math.hypot(x - origin.getX(), z - origin.getZ());
+            if (distance < minRadius || distance > maxRadius) {
+                continue;
+            }
+
+            BlockPos landing = resolveDrySurface(level, loadedChunk, x, z);
+            if (landing != null && isWellWithinBorder(level, landing)) {
+                return landing;
+            }
+        }
+        return null;
+    }
+
+    private static BlockPos resolveDrySurface(ServerLevel level, int x, int z) {
+        return resolveDrySurface(
+                level.getMinBuildHeight(),
+                x,
+                z,
+                (sampleX, sampleZ) -> level.getHeight(
+                        Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                        sampleX,
+                        sampleZ),
+                level::getBlockState,
+                level::getFluidState);
+    }
+
+    private static BlockPos resolveDrySurface(
+            ServerLevel level,
+            ChunkAccess chunk,
+            int x,
+            int z) {
+        return resolveDrySurface(
+                level.getMinBuildHeight(),
+                x,
+                z,
+                (sampleX, sampleZ) -> chunk.getHeight(
+                        Heightmap.Types.MOTION_BLOCKING_NO_LEAVES,
+                        sampleX,
+                        sampleZ) + 1,
+                chunk::getBlockState,
+                chunk::getFluidState);
+    }
+
+    private static BlockPos resolveStructureLanding(
+            ServerLevel level,
+            ChunkAccess chunk,
+            BlockPos structurePos) {
+        BlockPos exactLanding = resolveDrySurface(
+                level,
+                chunk,
+                structurePos.getX(),
+                structurePos.getZ());
+        if (exactLanding != null) {
+            return exactLanding;
+        }
+
+        int minX = chunk.getPos().getMinBlockX();
+        int minZ = chunk.getPos().getMinBlockZ();
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int localX = 1; localX <= 14; localX++) {
+            for (int localZ = 1; localZ <= 14; localZ++) {
+                candidates.add(new BlockPos(minX + localX, 0, minZ + localZ));
+            }
+        }
+        candidates.sort(Comparator.comparingDouble(candidate ->
+                candidate.distSqr(new BlockPos(structurePos.getX(), 0, structurePos.getZ()))));
+
+        for (BlockPos candidate : candidates) {
+            BlockPos landing = resolveDrySurface(
+                    level,
+                    chunk,
+                    candidate.getX(),
+                    candidate.getZ());
+            if (landing != null) {
+                LOGGER.info(
+                        "[ADQ] Moved structure landing from {} to nearby safe ground at {}.",
+                        structurePos.toShortString(),
+                        landing.toShortString());
+                return landing;
+            }
+        }
+        return null;
+    }
+
+    private static BlockPos resolveDrySurface(
+            int minBuildHeight,
+            int x,
+            int z,
+            IntBinaryOperator heightReader,
+            Function<BlockPos, net.minecraft.world.level.block.state.BlockState> blockStateReader,
+            Function<BlockPos, net.minecraft.world.level.material.FluidState> fluidStateReader) {
+        int centerY = heightReader.applyAsInt(x, z);
+        if (!DryLandingRules.canHaveGround(centerY, minBuildHeight)) {
+            return null;
+        }
+
+        int minY = Integer.MAX_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                int sampleX = x + dx;
+                int sampleZ = z + dz;
+                int sampleY = heightReader.applyAsInt(sampleX, sampleZ);
+                if (!DryLandingRules.canHaveGround(sampleY, minBuildHeight)) {
+                    return null;
+                }
+
+                BlockPos groundPos = new BlockPos(sampleX, sampleY - 1, sampleZ);
+                var groundState = blockStateReader.apply(groundPos);
+                if (groundState.isAir()
+                        || groundState.is(net.minecraft.tags.BlockTags.LEAVES)
+                        || !groundState.getFluidState().isEmpty()
+                        || !fluidStateReader.apply(groundPos.above()).isEmpty()) {
+                    return null;
+                }
+                minY = Math.min(minY, sampleY);
+                maxY = Math.max(maxY, sampleY);
+            }
+        }
+
+        if (maxY - minY > 2) {
+            return null;
+        }
+        return new BlockPos(x, centerY, z);
+    }
+
+    private static void registerGeneratedQuest(
+            ServerLevel level,
+            BlockPos startingPos,
+            BlockPos endingPos,
+            boolean useCustom,
+            CustomQuestTemplate selectedTemplate,
+            List<CustomQuestTemplate> templatesSource,
+            net.minecraft.util.RandomSource rand,
+            UUID triggerPlayerUuid,
+            String locationMode) {
+        try {
+            UUID questId = UUID.randomUUID();
+            String name;
+            String description;
+            String weightClass;
+            double actualWeight;
+            List<String> rewards = new ArrayList<>();
+            String schematicName;
+
+            if (useCustom) {
+                CustomQuestTemplate template = selectedTemplate;
+                if (template == null) {
+                    List<CustomQuestTemplate> templatesWithoutCoords = new ArrayList<>();
+                    for (CustomQuestTemplate candidate : templatesSource) {
+                        if (parseCoordinates(candidate.pickupPos) == null
+                                || parseCoordinates(candidate.dropoffPos) == null) {
+                            templatesWithoutCoords.add(candidate);
+                        }
+                    }
+                    if (templatesWithoutCoords.isEmpty()) {
+                        templatesWithoutCoords = templatesSource;
+                    }
+                    template = templatesWithoutCoords.get(rand.nextInt(templatesWithoutCoords.size()));
+                }
+                name = template.name;
+                description = template.description;
+                weightClass = template.weightClass;
+                actualWeight = template.actualWeight;
+                rewards.addAll(template.rewards);
+                schematicName = template.schematicName;
+            } else {
+                CustomQuestTemplate nameTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
+                CustomQuestTemplate descTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
+                CustomQuestTemplate weightTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
+                CustomQuestTemplate schematicTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
+                CustomQuestTemplate rewardTemplate = templatesSource.get(rand.nextInt(templatesSource.size()));
+
+                name = nameTemplate.name;
+                description = descTemplate.description;
+                weightClass = weightTemplate.weightClass;
+                actualWeight = weightTemplate.actualWeight;
+                rewards.addAll(rewardTemplate.rewards);
+                schematicName = schematicTemplate.schematicName;
+            }
+
+            QuestModel quest = new QuestModel(
+                    questId,
+                    name,
+                    description,
+                    startingPos,
+                    endingPos,
+                    weightClass,
+                    actualWeight,
+                    rewards);
+            quest.setCreationTime(System.currentTimeMillis());
+            quest.setSchematicName(schematicName);
+
+            synchronized (availableQuests) {
+                availableQuests.add(quest);
+            }
+            saveQuests();
+
+            LOGGER.info(
+                    "[ADQ] Generated {} quest: '{}' [{} class, {}kpg, Schematic: {}] from {} to {}",
+                    locationMode,
+                    name,
+                    weightClass,
+                    (int) actualWeight,
+                    quest.getSchematicName(),
+                    startingPos.toShortString(),
+                    endingPos.toShortString());
+        } catch (Exception error) {
+            LOGGER.error("[ADQ] Error finalising quest on server thread", error);
+        } finally {
+            finishGeneration(level, triggerPlayerUuid);
+        }
+    }
+
+    private static void failGeneration(ServerLevel level, UUID triggerPlayerUuid) {
+        announceGenerationFailure(level);
+        finishGeneration(level, triggerPlayerUuid);
+    }
+
+    private static void finishGeneration(ServerLevel level, UUID triggerPlayerUuid) {
+        isGenerating.set(false);
+        if (triggerPlayerUuid != null) {
+            ServerPlayer triggerPlayer = level.getServer().getPlayerList().getPlayer(triggerPlayerUuid);
+            if (triggerPlayer != null) {
+                ADQEventHandler.clearActionCooldown(triggerPlayer, "generate");
+                ADQEventHandler.clearActionCooldown(triggerPlayer, "fill");
+            }
+        }
+        QuestBoardMenuHandler.resyncToAllPlayers(level.getServer());
+    }
+
     private static void announceGenerationFailure(ServerLevel level) {
-        LOGGER.warn("[TNM Quests] Failed to locate suitable trade routes within distance and world border limits.");
+        LOGGER.warn("[ADQ] Failed to locate suitable trade routes within distance and world border limits.");
         level.getServer().execute(() -> {
             if (ADQConfig.ANNOUNCE_GEN_FAIL.get()) {
                 level.getServer().getPlayerList().broadcastSystemMessage(
-                    net.minecraft.network.chat.Component.literal("§6§l[TNM Quests] §cFailed to procedurally generate a new trade contract. No suitable trade routes found within the world border."),
+                    net.minecraft.network.chat.Component.literal("§6§l[ADQ] §cFailed to procedurally generate a new trade contract. No suitable trade routes found within the world border."),
                     false
                 );
             }
@@ -743,7 +1400,7 @@ public class QuestGenerator {
                 return new ParsedCoords(x, y, z, true);
             }
         } catch (NumberFormatException e) {
-            LOGGER.error("[TNM Quests] Failed to parse coordinates: " + coordStr, e);
+            LOGGER.error("[ADQ] Failed to parse coordinates: " + coordStr, e);
         }
         return null;
     }
@@ -751,22 +1408,25 @@ public class QuestGenerator {
     private static BlockPos resolvePosition(ServerLevel level, ParsedCoords coords) {
         int x = coords.x;
         int z = coords.z;
-        int y;
         if (coords.hasY && coords.y != 0) {
-            y = coords.y;
-        } else {
-            BlockPos tempPos = new BlockPos(x, 64, z);
-            level.getChunkAt(tempPos);
-            y = level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
-            if (y <= level.getMinBuildHeight()) {
-                // Empty column (open void) — no valid surface to resolve to.
-                return null;
+            BlockPos configuredPos = new BlockPos(x, coords.y, z);
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos groundPos = configuredPos.offset(dx, -1, dz);
+                    var groundState = level.getBlockState(groundPos);
+                    if (groundState.isAir()
+                            || groundState.is(net.minecraft.tags.BlockTags.LEAVES)
+                            || !groundState.getFluidState().isEmpty()
+                            || !level.getFluidState(groundPos.above()).isEmpty()) {
+                        return null;
+                    }
+                }
             }
-            if (y < level.getMinBuildHeight() + 10) {
-                y = level.getSeaLevel();
-            }
+            return configuredPos;
         }
-        return new BlockPos(x, y, z);
+
+        level.getChunkAt(new BlockPos(x, 64, z));
+        return resolveDrySurface(level, x, z);
     }
 
     public static boolean isWellWithinBorder(ServerLevel level, BlockPos pos) {
@@ -774,5 +1434,9 @@ public class QuestGenerator {
         double safetyBuffer = 150.0;
         return pos.getX() >= border.getMinX() + safetyBuffer && pos.getX() <= border.getMaxX() - safetyBuffer &&
                pos.getZ() >= border.getMinZ() + safetyBuffer && pos.getZ() <= border.getMaxZ() - safetyBuffer;
+    }
+
+    public static List<CustomQuestTemplate> getCustomTemplates() {
+        return customTemplates;
     }
 }

@@ -100,6 +100,7 @@ public class ADQSchematicManager {
         try (InputStream is = new FileInputStream(file)) {
             CompoundTag nbt = NbtIo.readCompressed(is, NbtAccounter.unlimitedHeap());
             ListTag palette = nbt.getList("palette", 10);
+            boolean hasIronBlock = false;
             for (int i = 0; i < palette.size(); i++) {
                 String name = palette.getCompound(i).getString("Name");
                 if (name.equals("simulated:docking_connector") || 
@@ -107,6 +108,18 @@ public class ADQSchematicManager {
                     name.equals("minecraft:netherite_block")) {
                     return true;
                 }
+                if (name.equals("minecraft:iron_block")) {
+                    hasIronBlock = true;
+                }
+            }
+            if (filename.equals("medium_machinery_pallet.nbt") && hasIronBlock) {
+                return true;
+            }
+            if (filename.equals("heavy_secure_container.nbt") && !hasIronBlock) {
+                return true;
+            }
+            if (filename.equals("heavy_industrial_boiler.nbt") && !hasIronBlock) {
+                return true;
             }
         } catch (Exception e) {
             return true;
@@ -131,18 +144,18 @@ public class ADQSchematicManager {
             // 2. Medium Machinery Pallet (using simulated:rope_connector, has exactly 8)
             if (needsRegeneration("medium_machinery_pallet.nbt")) {
                 writeNbtFile("medium_machinery_pallet.nbt", createPalletNbt(5, 3, 5,
-                    "minecraft:iron_block",
                     "minecraft:polished_andesite",
+                    "minecraft:stone",
                     "simulated:rope_connector",
                     "minecraft:spruce_fence_gate",
                     "minecraft:trapped_chest",
-                    "minecraft:iron_block"));
+                    "minecraft:polished_andesite"));
             }
 
             // 3. Heavy Secure Container (using simulated:rope_connector, has exactly 2)
             if (needsRegeneration("heavy_secure_container.nbt")) {
                 writeNbtFile("heavy_secure_container.nbt", createCrateNbt(5, 4, 5,
-                    "minecraft:polished_deepslate", // Replaced netherite with polished deepslate to prevent OP looting
+                    "minecraft:iron_block",
                     "minecraft:obsidian",
                     "minecraft:dark_oak_fence_gate",
                     "minecraft:trapped_chest",
@@ -172,8 +185,8 @@ public class ADQSchematicManager {
             // 6. Heavy Industrial Boiler (using simulated:rope_connector, has exactly 2)
             if (needsRegeneration("heavy_industrial_boiler.nbt")) {
                 writeNbtFile("heavy_industrial_boiler.nbt", createCrateNbt(5, 4, 5,
+                    "minecraft:iron_block",
                     "minecraft:blast_furnace",
-                    "minecraft:smooth_stone",
                     "minecraft:dark_oak_fence_gate",
                     "minecraft:trapped_chest",
                     "simulated:rope_connector"));
@@ -355,5 +368,29 @@ public class ADQSchematicManager {
         root.put("entities", new ListTag());
 
         return root;
+    }
+
+    public static Set<BlockPos> getNonAirRelativePositions(ServerLevel level, String schematicName) {
+        StructureTemplate template = getSchematic(level, schematicName);
+        if (template == null) return Collections.emptySet();
+
+        Set<BlockPos> nonAirPos = new HashSet<>();
+        CompoundTag nbt = template.save(new CompoundTag());
+        if (nbt.contains("blocks", 9)) {
+            ListTag blocksList = nbt.getList("blocks", 10);
+            for (int i = 0; i < blocksList.size(); i++) {
+                CompoundTag blockTag = blocksList.getCompound(i);
+                if (blockTag.contains("pos", 9)) {
+                    ListTag posList = blockTag.getList("pos", 3);
+                    if (posList.size() == 3) {
+                        int x = posList.getInt(0);
+                        int y = posList.getInt(1);
+                        int z = posList.getInt(2);
+                        nonAirPos.add(new BlockPos(x, y, z));
+                    }
+                }
+            }
+        }
+        return nonAirPos;
     }
 }

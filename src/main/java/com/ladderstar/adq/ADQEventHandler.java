@@ -15,7 +15,9 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -28,9 +30,20 @@ public class ADQEventHandler {
     @SubscribeEvent
     public static void onServerStarting(ServerStartingEvent event) {
         LOGGER.info("[TNM Quests] Server starting. Loading quests...");
+        QuestGenerator.resetRandomSearchQueue();
         ServerLevel overworld = event.getServer().overworld();
         ADQSchematicManager.loadSchematics(overworld);
         QuestGenerator.init(overworld);
+    }
+
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        QuestGenerator.resetRandomSearchQueue();
+    }
+
+    @SubscribeEvent
+    public static void onServerTick(ServerTickEvent.Post event) {
+        QuestGenerator.runRandomSearchStep(event.getServer());
     }
 
     @SubscribeEvent

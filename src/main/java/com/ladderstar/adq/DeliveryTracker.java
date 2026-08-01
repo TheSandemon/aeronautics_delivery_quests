@@ -23,6 +23,15 @@ import java.util.UUID;
 
 public class DeliveryTracker {
     private static final Logger LOGGER = LogManager.getLogger();
+    private static final java.util.Map<UUID, net.minecraft.world.level.ChunkPos> forcedChunksMap = new java.util.concurrent.ConcurrentHashMap<>();
+
+    public static void releaseForcedChunk(ServerLevel level, QuestModel quest) {
+        net.minecraft.world.level.ChunkPos prev = forcedChunksMap.remove(quest.getQuestId());
+        if (prev != null) {
+            level.getServer().overworld().setChunkForced(prev.x, prev.z, false);
+            LOGGER.info("[ADQ] Released forced cargo chunk {} for quest: {}", prev, quest.getName());
+        }
+    }
 
     // In-memory backoff so a failed Sable assembly (mod missing, schematic error) is
     // retried at most every 30 seconds instead of every tracker tick.
@@ -143,6 +152,18 @@ public class DeliveryTracker {
                             org.joml.Vector3dc pos = pose.position();
                             BlockPos cargoPos = new BlockPos((int)pos.x(), (int)pos.y(), (int)pos.z());
                             
+                            // Dynamic chunk forcing to prevent unloading
+                            net.minecraft.world.level.ChunkPos currentChunk = new net.minecraft.world.level.ChunkPos(cargoPos);
+                            net.minecraft.world.level.ChunkPos prevChunk = forcedChunksMap.get(quest.getQuestId());
+                            if (prevChunk == null || !prevChunk.equals(currentChunk)) {
+                                if (prevChunk != null) {
+                                    level.getServer().overworld().setChunkForced(prevChunk.x, prevChunk.z, false);
+                                }
+                                level.getServer().overworld().setChunkForced(currentChunk.x, currentChunk.z, true);
+                                forcedChunksMap.put(quest.getQuestId(), currentChunk);
+                                LOGGER.info("[ADQ] Forced cargo chunk {} for active quest: {}", currentChunk, quest.getName());
+                            }
+
                             double dx = Math.abs(cargoPos.getX() - destPos.getX());
                             double dz = Math.abs(cargoPos.getZ() - destPos.getZ());
                             double dy = Math.abs(cargoPos.getY() - destPos.getY());
@@ -238,11 +259,18 @@ public class DeliveryTracker {
             );
         }
 
-        MarkerManager.clearMarkers(player, quest);
         CargoAssembler.removeCargo(level, quest);
+        MarkerManager.clearMarkers(player, quest);
 
-        // Dispense rewards with scaling
-        for (String reward : quest.getRewards()) {
+        // Dispense rewards with scaling dynamically from custom_quests.json templates
+        java.util.List<String> rewards = quest.getRewards();
+        for (QuestGenerator.CustomQuestTemplate template : QuestGenerator.getCustomTemplates()) {
+            if (template.name.equals(quest.getName())) {
+                rewards = template.rewards;
+                break;
+            }
+        }
+        for (String reward : rewards) {
             String[] parts = reward.split(":");
             if (parts.length >= 2) {
                 try {

@@ -32,6 +32,8 @@ public class ADQConfig {
     public static final ModConfigSpec.BooleanValue ENABLE_CARGO_INVULNERABILITY;
     public static final ModConfigSpec.IntValue MIN_START_DISTANCE;
     public static final ModConfigSpec.IntValue CARGO_SPAWN_DISTANCE;
+    public static final ModConfigSpec.BooleanValue SKY_ISLAND_MODE;
+    public static final ModConfigSpec.IntValue RANDOM_SEARCH_ATTEMPTS;
     public static final ModConfigSpec.EnumValue<QuestGenerationMode> QUEST_GEN_MODE;
 
     public static final ModConfigSpec.BooleanValue ANNOUNCE_ACCEPT;
@@ -102,6 +104,17 @@ public class ADQConfig {
                          "Keep this comfortably above the server's typical client render distance so players never see the cargo pop in\n" +
                          "(e.g. a 10-chunk render distance is 160 blocks; the default 250 stays out of sight).")
                 .defineInRange("cargoSpawnDistance", 250, 32, 1000);
+
+        SKY_ISLAND_MODE = BUILDER
+                .comment("Enables the sparse-terrain RANDOM search used by floating-island worlds.\n" +
+                         "The search checks several positions in each candidate chunk and processes only one chunk at a time.\n" +
+                         "Water is rejected in every mode regardless of this setting.")
+                .define("skyIslandMode", false);
+
+        RANDOM_SEARCH_ATTEMPTS = BUILDER
+                .comment("Maximum unique chunks checked for each RANDOM endpoint.\n" +
+                         "The search stops at the first dry landing and never loads candidate chunks concurrently.")
+                .defineInRange("randomSearchAttempts", 96, 20, 512);
 
         QUEST_GEN_MODE = BUILDER
                 .comment("Quest generation mode. Controls how quest information (name, reward, schematic, weight) is selected:\n" +

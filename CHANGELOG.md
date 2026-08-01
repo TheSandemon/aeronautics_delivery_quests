@@ -1,3 +1,50 @@
+### TNM Aeronautics Quests - v1.1.4 Changelog
+
+#### Village and Structure Generation Restoration
+- Fixed VILLAGE and ANY_STRUCTURE searches finding route candidates but rejecting them during delayed surface validation.
+- Retain both endpoint chunks with short-lived ADQ region tickets until validation completes.
+- Validate surfaces against the completed `ChunkAccess` results returned by NeoForge.
+- If a structure locator points inside a building or onto uneven ground, select the nearest safe dry landing within that structure chunk.
+- Reproduced and verified automatic VILLAGE quest generation on a dedicated NeoForge server.
+
+---
+
+### TNM Aeronautics Quests - v1.1.3 Changelog
+
+#### Quest Generation Restoration
+- Fixed RANDOM candidate futures completing after their temporary vanilla chunk ticket expired.
+- Added a short-lived ADQ region ticket around each candidate and release it immediately after terrain validation.
+- Validate terrain from NeoForge's returned `ChunkAccess` rather than relying on the level's visible chunk cache.
+- Removed the invalid five-block minimum-height cutoff that rejected legitimate low-altitude terrain.
+- Reproduced and verified automatic quest generation on a dedicated NeoForge server.
+
+---
+
+### TNM Aeronautics Quests - v1.1.2 Changelog
+
+#### Server Stability
+- Fixed a `ConcurrentModificationException` caused by recursively requesting RANDOM candidate chunks while Minecraft updated its chunk-distance map.
+- Moved RANDOM chunk-generation requests off the server thread.
+- Added a server tick-post work queue that processes one search action per tick.
+- Added server lifecycle cleanup so stale search work cannot survive a stop or restart.
+- Added regression tests covering queue pacing and cleanup.
+
+---
+
+### TNM Aeronautics Quests - v1.1.1 Changelog
+
+#### Sky-Island Route Generation
+- Added `skyIslandMode` for RANDOM quests in sparse floating-island worlds.
+- Candidate chunks follow a golden-angle spiral instead of clustering randomly.
+- Searches stop at the first valid endpoint, keep one chunk request in flight, and use the configurable `randomSearchAttempts` ceiling.
+
+#### Dry-Land Safety
+- RANDOM, VILLAGE, ANY_STRUCTURE, and custom-coordinate endpoints reject water and waterlogged surfaces.
+- RANDOM validates each loaded candidate during the search instead of aborting after selecting an invalid route.
+- Cargo placement rejects missing ground, seabeds, void gaps, leaves, and excessively uneven footprints.
+
+---
+
 ### TNM Aeronautics Quests - v1.1.0 Changelog
 
 #### ✈️ TNM Rebranding

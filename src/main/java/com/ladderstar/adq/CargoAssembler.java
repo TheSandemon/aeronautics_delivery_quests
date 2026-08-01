@@ -56,8 +56,8 @@ public class CargoAssembler {
                 QuestGenerator.saveQuests();
             }
         } else {
-            LOGGER.warn("[TNM Quests] No clear spawning spot found around pickup location. Spawning at original position.");
-            spawnPos = originalStartPos;
+            LOGGER.error("[TNM Quests] No dry cargo footprint found around pickup location {}.", originalStartPos.toShortString());
+            return false;
         }
 
         BlockPos placeOrigin = spawnPos.offset(-W / 2, 0, -L / 2);
@@ -102,6 +102,8 @@ public class CargoAssembler {
         BlockPos startPos = quest.getStartingPos();
         LOGGER.info("[TNM Quests] Cleaning up cargo blocks/entities for quest: {}", quest.getName());
 
+        DeliveryTracker.releaseForcedChunk(level, quest);
+
         // 1. Remove physical Sable sublevel (main cargo body plus any split-off fragments)
         if (ModList.get().isLoaded("sable")) {
             if (quest.getCargoEntityId() != null) {
@@ -139,11 +141,14 @@ public class CargoAssembler {
         for (int y = centerY + 20; y >= centerY - 20; y--) {
             BlockPos pos = new BlockPos(x, y, z);
             BlockState state = level.getBlockState(pos);
-            if (!state.isAir() && state.isCollisionShapeFullBlock(level, pos)) {
+            if (!state.isAir()
+                    && state.getFluidState().isEmpty()
+                    && state.isCollisionShapeFullBlock(level, pos)
+                    && level.getFluidState(pos.above()).isEmpty()) {
                 return y;
             }
         }
-        return centerY - 20; // fallback
+        return Integer.MIN_VALUE;
     }
 
     private static BlockPos findClearSpawningSpot(ServerLevel level, BlockPos center, BlockPos playerPos, int W, int H, int L) {
@@ -161,9 +166,14 @@ public class CargoAssembler {
                 int minY = Integer.MAX_VALUE;
                 boolean validGround = true;
 
+                footprint:
                 for (int x = cx - W / 2; x < cx - W / 2 + W; x++) {
                     for (int z = cz - L / 2; z < cz - L / 2 + L; z++) {
                         int hy = getHighestSolidY(level, x, z, center.getY());
+                        if (hy == Integer.MIN_VALUE) {
+                            validGround = false;
+                            break footprint;
+                        }
                         if (hy > maxY) maxY = hy;
                         if (hy < minY) minY = hy;
 
@@ -173,6 +183,10 @@ public class CargoAssembler {
                             validGround = false;
                         }
                     }
+                }
+
+                if (!validGround) {
+                    continue;
                 }
 
                 int flatness = maxY - minY;
@@ -206,26 +220,6 @@ public class CargoAssembler {
                     bestPos = new BlockPos(cx, maxY + 3, cz); // Spawn 3 blocks in the air!
                 }
             }
-        }
-
-        if (bestPos == null) {
-            // Safety fallback: if no perfect flat spot is found nearby, spawn 4 blocks directly
-            // above the highest solid block in the original center area to guarantee no clipping!
-            int maxY = Integer.MIN_VALUE;
-            for (int x = center.getX() - W / 2; x < center.getX() - W / 2 + W; x++) {
-                for (int z = center.getZ() - L / 2; z < center.getZ() - L / 2 + L; z++) {
-                    int hy = getHighestSolidY(level, x, z, center.getY());
-                    if (hy > maxY) maxY = hy;
-                    // Over water the highest SOLID block is the seabed; clamp to the fluid
-                    // surface so cargo never spawns submerged (it lands on the water instead).
-                    int surfaceY = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.WORLD_SURFACE, x, z) - 1;
-                    if (surfaceY > maxY && !level.getFluidState(new BlockPos(x, surfaceY, z)).isEmpty()) {
-                        maxY = surfaceY;
-                    }
-                }
-            }
-            bestPos = new BlockPos(center.getX(), maxY + 4, center.getZ());
-            LOGGER.warn("[TNM Quests] Proximity scan failed to find a flat clear spot. Using safe air fallback at {}", bestPos.toShortString());
         }
 
         return bestPos;

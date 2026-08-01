@@ -22,13 +22,27 @@
 
 ---
 
+## Sky-Island Worlds
+
+For sparse floating-island worlds, set these values in `config/aeronautics_delivery_quests.toml`:
+
+```toml
+questLocationMode = "RANDOM"
+skyIslandMode = true
+randomSearchAttempts = 96
+```
+
+Sky-island searches keep one candidate chunk in flight and stop when both dry endpoints are found. Increase `randomSearchAttempts` only for exceptionally sparse worlds. Every location mode rejects water, waterlogged ground, void columns, leaves, and excessively uneven landing footprints.
+
+---
+
 ## 🔍 For the Skeptics (FAQ)
 
 ### 💻 Does this require client-side installs?
 **Yes.** Because the mod introduces the physical **Delivery Quests Table** block, custom clipboard menus, client-side screen UI rendering, and network synchronization packets, it must be installed on both the server and the client (or just the client for singleplayer).
 
 ### 📉 Will this cause tick lag or TPS spikes during generation?
-**No.** To prevent the classic "structure-lookup tick spikes," all village searches and pathfinding calculations are run on **fully asynchronous background threads** (`ForkJoinPool`). Only the final block placement is scheduled on the main thread, keeping your server running at a solid 20 TPS.
+Route discovery runs asynchronously, while chunk requests and terrain validation are paced through the server tick loop. RANDOM searches keep one candidate chunk in flight, and structure routes retain only their two endpoint chunks while validation completes. This avoids blocking chunk-generation loops and keeps generation work bounded.
 
 ### 🛡️ Will this block players from modifying their own airships?
 **No.** The block protection is highly targeted: it only intercepts destruction inside the exact physics-body bounds of an *active delivery quest's* cargo (including any pieces that break off it) and its Overworld pickup footprint. Invulnerability shielding only applies when `enableCargoInvulnerability` is enabled in the config. Normal airships, blocks, and structures remain 100% destructible. One rule always applies regardless of the setting: **cargo blocks never drop their items**, so contracts can't be mined for free loot.
@@ -36,8 +50,8 @@
 ### 🌀 What happens if cargo spawns outside the world border, underground, underwater, or inside buildings?
 *   **Out-of-Sight Pre-Spawning**: Cargo materializes while the approaching pilot is still beyond render distance (`cargoSpawnDistance`, default 250 blocks), so nobody ever sees it pop in.
 *   **Safe Air-Column Spawning**: The mod scans a horizontal $33\times33$ area around the start coordinates to find a solid, flat footprint. It checks that the entire spawn space (and the air blocks below it) is 100% empty air, spawning the cargo 3 blocks in the air so it falls cleanly under gravity without clipping or breaking blocks.
-*   **Vertical Safety Fallback**: If no flat terrain is found nearby, the mod safely spawns the cargo 4 blocks above the highest solid block in the original target coordinates, guaranteeing it never clips inside ground structures or houses.
-*   **Water & Void Safety**: Over oceans and lakes, cargo lands on the water surface instead of sinking to the seabed. On floating-island/void world types, generation detects empty columns and retries elsewhere instead of dropping cargo into the void.
+*   **Dry-Land Validation**: Water, waterlogged blocks, leaves, void columns, and unsafe footprints are rejected. If the selected coordinate is unsuitable, structure routes search the completed endpoint chunk for the nearest safe landing; RANDOM routes continue to another candidate.
+*   **No Unsafe Fallback**: If cargo placement cannot find a dry, clear footprint near the pickup, it fails cleanly instead of placing cargo underwater, over the void, or inside terrain.
 *   **Border Buffer**: The engine enforces a strict **150-block safety buffer** from your world border. If a potential spawn is too close to or outside the border, it is aborted instantly.
 
 ### 💾 Does it survive server restarts?

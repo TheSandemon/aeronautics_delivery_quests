@@ -71,11 +71,33 @@ tasks.withType(ProcessResources).configureEach {
 
 dependencies {
     compileOnly fileTree(dir: 'libs', include: ['*.jar'])
+    runtimeOnly fileTree(dir: 'libs', include: ['*.jar'], exclude: ['ftb-*.jar'])
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+tasks.register('packageCurseForge', Sync) {
+    dependsOn tasks.named('jar')
+    from tasks.named('jar').flatMap { it.archiveFile }
+    into layout.buildDirectory.dir('release/curseforge')
+}
+
+tasks.register('packageModrinth', Sync) {
+    dependsOn tasks.named('jar')
+    from tasks.named('jar').flatMap { it.archiveFile }
+    into layout.buildDirectory.dir('release/modrinth')
+}
+
+tasks.register('packageRelease') {
+    dependsOn tasks.named('packageCurseForge'), tasks.named('packageModrinth')
 }
 
 publishMods {
     file = tasks.named('jar').flatMap { it.archiveFile }
-    changelog = file("CHANGELOG.md").text
+    changelog = file("RELEASE_NOTES.md").text
     type = STABLE
     displayName = "${mod_name} ${mod_version} (NeoForge ${minecraft_version})"
 
@@ -85,7 +107,6 @@ publishMods {
         
         minecraftVersions.add(minecraft_version)
         modLoaders.add("neoforge")
-
         // Required on both sides (UI/screens on the client, quest logic on the server)
         clientRequired = true
         serverRequired = true

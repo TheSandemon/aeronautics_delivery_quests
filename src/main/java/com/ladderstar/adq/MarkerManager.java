@@ -34,7 +34,7 @@ public class MarkerManager {
 
     public static void ensureAndCalibrateCompass(ServerPlayer player, QuestModel quest) {
         BlockPos targetPos = quest.isCargoPickedUp() ? quest.getEndingPos() : quest.getStartingPos();
-        GlobalPos targetGlobalPos = GlobalPos.of(player.serverLevel().dimension(), targetPos);
+        GlobalPos targetGlobalPos = GlobalPos.of(net.minecraft.world.level.Level.OVERWORLD, targetPos);
         boolean found = false;
 
         // Scan main inventory and offhand
@@ -47,7 +47,7 @@ public class MarkerManager {
                     boolean needsUpdate = true;
                     if (tracker != null && tracker.target().isPresent()) {
                         GlobalPos currentTarget = tracker.target().get();
-                        if (currentTarget.pos().equals(targetPos) && currentTarget.dimension().equals(player.serverLevel().dimension())) {
+                        if (currentTarget.pos().equals(targetPos) && currentTarget.dimension().equals(net.minecraft.world.level.Level.OVERWORLD)) {
                             needsUpdate = false;
                         }
                     }
