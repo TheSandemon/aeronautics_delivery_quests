@@ -49,15 +49,20 @@ public class QuestBoardScreen extends AbstractSimiScreen {
 
         // Find player's active quest
         QuestModel active = null;
-        UUID playerUuid = Minecraft.getInstance().player.getUUID();
-        for (QuestModel quest : quests) {
-            if (playerUuid.equals(quest.getAcceptedBy()) && !quest.isCompleted()) {
-                active = quest;
-                break;
+        net.minecraft.client.player.LocalPlayer player = Minecraft.getInstance().player;
+        if (player != null) {
+            UUID playerUuid = player.getUUID();
+            for (QuestModel quest : quests) {
+                if (playerUuid.equals(quest.getAcceptedBy()) && !quest.isCompleted()) {
+                    active = quest;
+                    break;
+                }
             }
+            this.isOp = player.hasPermissions(2);
+        } else {
+            this.isOp = false;
         }
         this.activeQuest = active;
-        this.isOp = Minecraft.getInstance().player.hasPermissions(2);
     }
 
     public void updateQuests(List<QuestModel> newQuests, long cooldownRemainingSeconds, long nextQuestTimerSeconds) {
@@ -83,11 +88,14 @@ public class QuestBoardScreen extends AbstractSimiScreen {
 
         // Find player's active quest
         QuestModel active = null;
-        UUID playerUuid = Minecraft.getInstance().player.getUUID();
-        for (QuestModel quest : this.quests) {
-            if (playerUuid.equals(quest.getAcceptedBy()) && !quest.isCompleted()) {
-                active = quest;
-                break;
+        net.minecraft.client.player.LocalPlayer player = Minecraft.getInstance().player;
+        if (player != null) {
+            UUID playerUuid = player.getUUID();
+            for (QuestModel quest : this.quests) {
+                if (playerUuid.equals(quest.getAcceptedBy()) && !quest.isCompleted()) {
+                    active = quest;
+                    break;
+                }
             }
         }
         this.activeQuest = active;
@@ -324,7 +332,9 @@ public class QuestBoardScreen extends AbstractSimiScreen {
                     String[] parts = rawReward.split(":");
                     if (parts.length >= 2) {
                         String rName = parts[1].replace("_", " ");
-                        rName = Character.toUpperCase(rName.charAt(0)) + rName.substring(1);
+                        if (!rName.isEmpty()) {
+                            rName = Character.toUpperCase(rName.charAt(0)) + rName.substring(1);
+                        }
                         String count = parts.length > 2 ? parts[2] : "1";
                         rewardStrings.add(rName + " x" + count);
                     }
@@ -382,7 +392,9 @@ public class QuestBoardScreen extends AbstractSimiScreen {
                             String[] parts = rawReward.split(":");
                             if (parts.length >= 2) {
                                 String rName = parts[1].replace("_", " ");
-                                rName = Character.toUpperCase(rName.charAt(0)) + rName.substring(1);
+                                if (!rName.isEmpty()) {
+                                    rName = Character.toUpperCase(rName.charAt(0)) + rName.substring(1);
+                                }
                                 String count = parts.length > 2 ? parts[2] : "1";
                                 rewardStrings.add(rName + " x" + count);
                             }

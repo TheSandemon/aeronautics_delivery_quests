@@ -150,7 +150,7 @@ public class DeliveryTracker {
                         if (cargoSubLevel != null) {
                             dev.ryanhcode.sable.companion.math.Pose3dc pose = cargoSubLevel.logicalPose();
                             org.joml.Vector3dc pos = pose.position();
-                            BlockPos cargoPos = new BlockPos((int)pos.x(), (int)pos.y(), (int)pos.z());
+                            BlockPos cargoPos = net.minecraft.core.BlockPos.containing(pos.x(), pos.y(), pos.z());
                             
                             // Dynamic chunk forcing to prevent unloading
                             net.minecraft.world.level.ChunkPos currentChunk = new net.minecraft.world.level.ChunkPos(cargoPos);

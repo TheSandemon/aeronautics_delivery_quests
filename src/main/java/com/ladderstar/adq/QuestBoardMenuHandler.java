@@ -251,7 +251,7 @@ public class QuestBoardMenuHandler {
             int count = quests.size();
             for (QuestModel quest : quests) {
                 if (quest.getAcceptedBy() != null) {
-                    ServerPlayer p = (ServerPlayer) player.serverLevel().getPlayerByUUID(quest.getAcceptedBy());
+                    ServerPlayer p = player.getServer().getPlayerList().getPlayer(quest.getAcceptedBy());
                     if (p != null) {
                         MarkerManager.clearMarkers(p, quest);
                         p.sendSystemMessage(Component.literal("§c§l[TNM Quests] Quest Force Deleted by Admin: §fThe delivery cargo has been recalled."));

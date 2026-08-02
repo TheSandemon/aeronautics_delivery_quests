@@ -688,20 +688,16 @@ public class QuestGenerator {
             chunkSource.addRegionTicket(STRUCTURE_SEARCH_TICKET, startTicketPos, 2, startTicketPos);
             chunkSource.addRegionTicket(STRUCTURE_SEARCH_TICKET, endTicketPos, 2, endTicketPos);
 
-            var startFuture = java.util.concurrent.CompletableFuture
-                    .supplyAsync(() -> chunkSource.getChunkFuture(
-                            startChunkX,
-                            startChunkZ,
-                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
-                            true))
-                    .thenCompose(Function.identity());
-            var endFuture = java.util.concurrent.CompletableFuture
-                    .supplyAsync(() -> chunkSource.getChunkFuture(
-                            endChunkX,
-                            endChunkZ,
-                            net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
-                            true))
-                    .thenCompose(Function.identity());
+            var startFuture = chunkSource.getChunkFuture(
+                    startChunkX,
+                    startChunkZ,
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
+                    true);
+            var endFuture = chunkSource.getChunkFuture(
+                    endChunkX,
+                    endChunkZ,
+                    net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
+                    true);
 
             startFuture.thenCombine(endFuture, (startResult, endResult) -> new ChunkAccess[] {
                     startResult.orElse(null),
@@ -1005,13 +1001,11 @@ public class QuestGenerator {
             net.minecraft.server.level.ServerChunkCache chunkSource = level.getChunkSource();
             ChunkPos ticketPos = new ChunkPos(candidateChunkX, candidateChunkZ);
             chunkSource.addRegionTicket(RANDOM_SEARCH_TICKET, ticketPos, 2, ticketPos);
-            java.util.concurrent.CompletableFuture
-                .supplyAsync(() -> chunkSource.getChunkFuture(
+            chunkSource.getChunkFuture(
                             candidateChunkX,
                             candidateChunkZ,
                             net.minecraft.world.level.chunk.status.ChunkStatus.FULL,
-                            true))
-                .thenCompose(chunkFuture -> chunkFuture)
+                            true)
                 .whenComplete((chunkResult, error) -> {
                     try {
                         enqueueRandomSearchStep(level.getServer(), epoch, () -> {

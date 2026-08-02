@@ -507,7 +507,7 @@ public class ADQEventHandler {
                 
                 // Clean up quest (cargo, markers) if active
                 if (quest.getAcceptedBy() != null) {
-                    ServerPlayer targetPlayer = (ServerPlayer) level.getPlayerByUUID(quest.getAcceptedBy());
+                    ServerPlayer targetPlayer = level.getServer().getPlayerList().getPlayer(quest.getAcceptedBy());
                     if (targetPlayer != null) {
                         MarkerManager.clearMarkers(targetPlayer, quest);
                         targetPlayer.sendSystemMessage(Component.literal("§c§l[TNM Quests] Quest Force Deleted by Admin: §fThe delivery cargo has been recalled."));
@@ -543,7 +543,7 @@ public class ADQEventHandler {
                 int count = quests.size();
                 for (QuestModel quest : quests) {
                     if (quest.getAcceptedBy() != null) {
-                        ServerPlayer targetPlayer = (ServerPlayer) level.getPlayerByUUID(quest.getAcceptedBy());
+                        ServerPlayer targetPlayer = level.getServer().getPlayerList().getPlayer(quest.getAcceptedBy());
                         if (targetPlayer != null) {
                             MarkerManager.clearMarkers(targetPlayer, quest);
                             targetPlayer.sendSystemMessage(Component.literal("§c§l[TNM Quests] Quest Force Deleted by Admin: §fThe delivery cargo has been recalled."));
